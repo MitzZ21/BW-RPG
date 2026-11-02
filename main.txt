@@ -1,0 +1,231 @@
+    const pl = players.find(x => x.username.toLowerCase() === u.toLowerCase() && x.password === p);
+    if (pl) {
+      if (pl.active === false) { try { await uDoc('users', pl.id, { active: true, deletedAt: null }); pl.active = true; } catch (e) { console.warn('Não foi possível reativar o utilizador:', e); } } 
+      const isGmUser = pl.role === 'gm' || pl.username.toLowerCase() === 'mitzz';
+      setLogicalUser({ 
+        ...pl, 
+        isAdmin: !!pl.isAdmin, 
+        canResetPassword: !!pl.canResetPassword,
+        assignedCampaigns: isGmUser ? campaigns.map(c => c.id) : (pl.assignedCampaigns || [])
+      }); 
+      if (pl.isAdmin && !pl.assignedCampaigns?.length && pl.role !== 'gm') {
+        setInAdminPanel(true);
+      }
+      return null; 
+    }
+    return 'Credenciais inválidas.';
+  };
+
+
+  if (!systemReady) return <div className="min-h-screen bg-black flex justify-center items-center"><div className="animate-spin h-12 w-12 border-4 border-red-600 rounded-full border-t-transparent"></div></div>;
+  if (!logicalUser) return <LoginScreen onLogin={handleLogin} />;
+
+  if (inAdminPanel) {
+    const isMitzZOrHasCampaigns = logicalUser.username.toLowerCase() === 'mitzz' || (logicalUser.assignedCampaigns && logicalUser.assignedCampaigns.length > 0) || logicalUser.role === 'gm';
+    return <AdminDashboard 
+      currentUser={logicalUser}
+      players={players.filter(p => p.active !== false)} 
+      campaigns={campaigns} 
+      stores={stores}
+      categories={categories}
+      items={items}
+      onLogout={() => { setLogicalUser(null); setInAdminPanel(false); setSelectedCampaignId(null); }} 
+      onBackToGame={isMitzZOrHasCampaigns ? () => setInAdminPanel(false) : null}
+      onCreatePlayer={(u, p, r, c, isAdmin, canReset, permissions) => cDoc('users', { username: u, password: p, role: r, assignedCampaigns: c, isAdmin, canResetPassword: canReset, permissions: permissions || {}, active: true })} 
+      onCreateCampaign={(n, classes) => cDoc('campaigns', { name: n, classes })}
+      onDeleteCampaign={async (campaignId) => {
+        const related = [
+          ['characters', characters.filter(x => x.id.startsWith(`${campaignId}_`)).map(x => x.id)],
+          ['rolls', rolls.filter(x => x.campaignId === campaignId).map(x => x.id)],
+          ['initiatives', initiatives.filter(x => x.campaignId === campaignId).map(x => x.id)],
+          ['npcs', npcs.filter(x => x.campaignId === campaignId).map(x => x.id)],
+          ['negotiations', negotiations.filter(x => x.campaignId === campaignId).map(x => x.id)],
+          ['sessions', sessions.filter(x => x.campaignId === campaignId || x.id === campaignId).map(x => x.id)]
+        ];
+        for (const [col, ids] of related) for (const id of ids) await dDoc(col, id);
+        for (const user of players) {
+          if (user.assignedCampaigns?.includes(campaignId)) await uDoc('users', user.id, { assignedCampaigns: user.assignedCampaigns.filter(id => id !== campaignId) });
+        }
+        await dDoc('campaigns', campaignId);
+        if (selectedCampaignId === campaignId) setSelectedCampaignId(null);
+      }} 
+      onCreateStore={(sData) => cDoc('stores', sData)}
+      onCreateCategory={(cData) => cDoc('categories', cData)}
+      onCreateItem={(itemData) => cDoc('items', itemData)}
+      onUpdateItem={(id, itemData) => uDoc('items', id, itemData)}
+      onDeleteItem={(id) => dDoc('items', id)}
+      onDeleteStore={(id) => dDoc('stores', id)}
+      onDeleteCategory={(id) => dDoc('categories', id)}
+      onDeletePlayer={(id) => uDoc('users', id, { active: false, deletedAt: Date.now() })}
+      onUpdatePlayerPassword={(userId, newPass) => uDoc('users', userId, { password: newPass })}
+      onUpdateUserCampaigns={(userId, camps) => uDoc('users', userId, { assignedCampaigns: camps })}
+      onUpdateUserPermissions={(userId, permissions) => uDoc('users', userId, { permissions })}
+      onUpdateCampaignClasses={(campId, classes) => uDoc('campaigns', campId, { classes })}
+    />;
+  }
+
+  if (!selectedCampaignId) {
+    const refreshedUser = logicalUser.username.toLowerCase() === 'mitzz' ? { ...logicalUser, assignedCampaigns: campaigns.map(c => c.id) } : logicalUser;
+    return <CampaignSelection 
+      player={refreshedUser} 
+      campaigns={campaigns} 
+      onSelectCampaign={setSelectedCampaignId} 
+      onLogout={() => { setLogicalUser(null); setSelectedCampaignId(null); }} 
+      onOpenAdmin={() => setInAdminPanel(true)}
+    />;
+  }
+
+  const actCamp = campaigns.find(c => c.id === selectedCampaignId);
+  if (!actCamp) return <div className="min-h-screen bg-black text-zinc-500 flex items-center justify-center">A carregar a campanha...</div>;
+
+  if (logicalUser.role === 'gm' || logicalUser.username.toLowerCase() === 'mitzz') {
+    if (gmOpeningPhoneModal) {
+      return <GMPhoneModal 
+        campaign={actCamp} npcs={npcs} characters={characters} 
+        onBack={() => setGmOpeningPhoneModal(false)}
+        onGMSendMessage={async (playerPhoneNum, npcPhoneNum, msgObj) => {
+          characters.forEach(async (ch) => {
+            if (ch.phoneNum === playerPhoneNum) {
+              const currentMsgs = ch.messages || {};
+              const phoneMsgs = currentMsgs[npcPhoneNum] || [];
+              await uDoc('characters', ch.id, {
+                messages: {
+                  ...currentMsgs,
+                  [npcPhoneNum]: [...phoneMsgs, msgObj]
+                }
+              });
+            }
+          });
+        }}
+      />;
+    }
+
+    if (gmViewingChar) {
+       return <PlayerSheet isReadOnly={true} player={{ username: gmViewingChar.identity?.player || 'Operacional' }} campaign={actCamp} characterData={gmViewingChar} stores={stores} categories={categories} items={items} npcs={npcs} characters={characters} session={sessions.find(s => s.id === actCamp.id)} onBack={() => setGmViewingChar(null)} onOpenAdmin={() => setInAdminPanel(true)} currentUser={logicalUser} />
+    }
+    return <AppErrorBoundary>
+      <GMPanel 
+      campaign={actCamp} characters={characters} rolls={rolls} initiatives={initiatives} npcs={npcs} stores={stores} categories={categories} items={items} negotiations={negotiations}
+      session={sessions.find(s => s.id === actCamp.id)}
+      currentUser={logicalUser}
+      onBack={() => setSelectedCampaignId(null)}
+      onOpenGMPhone={() => setGmOpeningPhoneModal(true)}
+      onStartSession={async (sessionName, sessionDescription = '') => {
+        const existing = sessions.find(s => s.id === actCamp.id);
+        const payload = { id: actCamp.id, campaignId: actCamp.id, name: sessionName, description: sessionDescription, active: true, startedAt: Date.now(), npcIds: existing?.npcIds || [], lastRoll: null, participantIds: [] };
+        if (existing) await uDoc('sessions', actCamp.id, payload); else await cDoc('sessions', payload);
+      }}
+      onEndSession={async () => { const sess=sessions.find(s=>s.id===actCamp.id); for (const cid of (sess?.participantIds||[])) { const ch=characters.find(c=>c.id===cid); if(ch) await uDoc('characters', ch.id, { money:(Number(ch.money)||0)+900 }); } await uDoc('sessions', actCamp.id, { active:false, endedAt:Date.now(), reward:900 }); }}
+      onToggleSessionNPC={async (npcId) => {
+        const existing = sessions.find(s => s.id === actCamp.id);
+        const ids = existing?.npcIds || [];
+        const next = ids.includes(npcId) ? ids.filter(id => id !== npcId) : [...ids, npcId];
+        if (existing) await uDoc('sessions', actCamp.id, { npcIds: next });
+        else await cDoc('sessions', { id: actCamp.id, campaignId: actCamp.id, active: false, npcIds: next, participantIds: [], lastRoll: null });
+      }}
+      onClearRolls={async () => { for(const r of rolls.filter(x=>x.campaignId===actCamp.id)) await dDoc('rolls',r.id); }}
+      onAddInitiative={(c, n, v) => cDoc('initiatives', { campaignId: c, name: n, value: v })}
+      onDeleteInitiative={(id) => dDoc('initiatives', id)}
+      onAddNPC={(c, n, type, vida, sanidade, phone, portrait) => cDoc('npcs', { campaignId: c, name: n, type, vida, maxVida: vida, sanidade, maxSanidade: sanidade, phone, portrait: portrait || '', attacks: '', abilities: '', weaknesses: '' })}
+      onUpdateNPC={(id, data) => uDoc('npcs', id, data)}
+      onDeleteNPC={(id) => dDoc('npcs', id)}
+      onViewPlayerSheet={(char) => setGmViewingChar(char)}
+      onOpenAdmin={() => setInAdminPanel(true)}
+      onSetStoreActive={(campId, storeId) => uDoc('campaigns', campId, { activeStoreId: storeId })}
+      onSetBankActive={(campId, active) => uDoc('campaigns', campId, { activeBank: active })}
+      onCounterNegotiation={async (negId, price, message) => { const neg=negotiations.find(n=>n.id===negId); if(!neg) return; const history=[...(neg.history||[]),{by:'gm',price,message:message||'',timestamp:Date.now()}]; await uDoc('negotiations',negId,{proposedPrice:price,negotiationMessage:message||'',lastOfferBy:'gm',history}); }}
+      onResolveNegotiation={async (negId, status) => {
+        const neg = negotiations.find(n => n.id === negId);
+        if (!neg) return;
+        if (status === 'approved') {
+          const charDocId = `${neg.campaignId}_${neg.playerId}`;
+          const targetChar = characters.find(c => c.id === charDocId);
+          const agreedPrice = Math.max(0, Number(neg.proposedPrice ?? neg.itemData?.price) || 0);
+          if (!targetChar) return siteNotify('Ficha do jogador não encontrada.');
+          const money = Number(targetChar.money) || 0; const bank = Number(targetChar.bankMoney) || 0;
+          if (money + bank < agreedPrice) return siteNotify(`O jogador não tem dinheiro suficiente para pagar ${agreedPrice} CR.`);
+          const fromHand = Math.min(money, agreedPrice); const fromBank = agreedPrice - fromHand;
+          const inv = [...(targetChar.inventory || [])]; const capacity = 10 + inv.filter(i=>i.itemType==='backpack'&&i.backpackOpen).reduce((sum,i)=>sum+(Number(i.backpackSlots)||0),0); const quantity=Math.max(1,Math.floor(Number(neg.quantity||neg.itemData?.quantity||1))); const stackable=neg.itemData?.stackable !== false && neg.itemData?.itemType !== 'weapon' && neg.itemData?.itemType !== 'backpack'; const existing=stackable ? inv.findIndex(i=>i.name===neg.itemName && i.itemType===neg.itemData?.itemType && i.stackable!==false) : -1; const freeSlots=capacity-inv.filter(i=>i.itemType!=='backpack').length; if(!stackable && freeSlots<quantity)return siteNotify(`O inventário do jogador não tem slots suficientes (${quantity} necessários).`); if(stackable && existing<0 && freeSlots<1)return siteNotify(`O inventário do jogador está cheio (${capacity} slots).`); const newInv=stackable ? (existing>=0 ? inv.map((x,i)=>i===existing?{...x,quantity:Number(x.quantity||1)+quantity,finalPrice:agreedPrice}:x) : [...inv,{...neg.itemData,quantity,finalPrice:agreedPrice}]) : [...inv,...Array.from({length:quantity},()=>({...neg.itemData,quantity:1,finalPrice:agreedPrice}))];
+          await uDoc('characters', charDocId, { inventory: newInv, money: money - fromHand, bankMoney: bank - fromBank });
+        }
+        await uDoc('negotiations', negId, { status, resolvedPrice: status === 'approved' ? (Number(neg.proposedPrice) || 0) : null, resolvedAt: Date.now() });
+      }}
+      onGMAddItemToChar={async (charObj, itemObj) => {
+        const inv = [...(charObj.inventory || [])]; const capacity = 10 + inv.filter(i => i.itemType === 'backpack' && i.backpackOpen).reduce((sum,i)=>sum+(Number(i.backpackSlots)||0),0); const stackable = itemObj?.stackable !== false && itemObj?.itemType !== 'weapon' && itemObj?.itemType !== 'backpack'; const existing = stackable ? inv.findIndex(i=>i.name===itemObj.name && i.itemType===itemObj.itemType && i.stackable!==false) : -1; if (existing < 0 && inv.filter(i => i.itemType !== 'backpack').length >= capacity) return siteNotify(`Inventário cheio (${capacity} slots).`); const newInv = existing >= 0 ? inv.map((x,i)=>i===existing?{...x,quantity:Number(x.quantity||1)+Number(itemObj.quantity||1)}:x) : [...inv, { ...itemObj, quantity: stackable ? Number(itemObj.quantity||1) : 1, backpackOpen: itemObj.itemType === 'backpack' ? !!itemObj.backpackOpen : undefined, contents: itemObj.itemType === 'backpack' ? (itemObj.contents || []) : itemObj.contents }];
+        await uDoc('characters', charObj.id, { inventory: newInv });
+      }}
+      onGMRemoveItemFromChar={async (charObj, idx) => { const inv=[...(charObj.inventory||[])]; inv.splice(idx,1); await uDoc('characters',charObj.id,{inventory:inv}); }}
+      onUpdateCharacter={async (charId, action) => { const ch=characters.find(c=>c.id===charId); if(!ch) return; if(action.shootWeaponIndex!==undefined){
+        const inv=[...(ch.inventory||[])]; const w=inv[action.shootWeaponIndex];
+        if(!w || Number(w.ammoLoaded||0)<=0) return siteNotify('A arma não tem munição carregada.');
+        inv[action.shootWeaponIndex]={...w,ammoLoaded:Number(w.ammoLoaded||0)-1};
+        await uDoc('characters',charId,{inventory:inv});
+        const damage=Math.max(0,Number(action.damageResult)||0);
+        if(action.targetType==='character' && action.targetId && action.targetId!==charId){
+          const target=characters.find(c=>c.id===action.targetId);
+          if(target && (session?.participantIds||[]).includes(target.id)){
+            const vida=target.status?.vida||{};
+            await uDoc('characters',target.id,{status:{...(target.status||{}),vida:{...vida,current:Math.max(0,(Number(vida.current)||0)-damage)}}});
+          }
+        } else if(action.targetType==='npc' && action.targetId){
+          const target=npcs.find(n=>n.id===action.targetId);
+          if(target && (session?.npcIds||[]).includes(target.id)) await uDoc('npcs',target.id,{vida:Math.max(0,(Number(target.vida)||0)-damage)});
+        }
+        return;
+      } if(action.reloadWeaponIndex!==undefined){ const inv=[...(ch.inventory||[])]; const w=inv[action.reloadWeaponIndex]; if(!w) return; if(!w.ammoType) return siteNotify('Esta arma não tem um tipo de munição compatível definido.'); const needed=Math.max(0,Number(w.magazineSize||0)-Number(w.ammoLoaded||0)); if(needed<=0) return siteNotify('O carregador já está cheio.'); const idxAmmo=inv.findIndex(a=>a.itemType==='ammo' && a.ammoType===w.ammoType && Number(a.quantity||1)>0); if(idxAmmo<0) return siteNotify('Sem munição compatível.'); const use=Math.min(needed,Number(inv[idxAmmo].quantity||1)); inv[idxAmmo]={...inv[idxAmmo],quantity:Number(inv[idxAmmo].quantity||1)-use}; inv[action.reloadWeaponIndex]={...w,ammoLoaded:Number(w.ammoLoaded||0)+use}; await uDoc('characters',charId,{inventory:inv.filter(x=>Number(x.quantity??1)>0)}); } }}
+      onGMUpdateMoney={async (charObj, newMoney) => {
+        await uDoc('characters', charObj.id, { money: newMoney });
+      }}
+      onGMUpdateBankMoney={async (charObj, newBank) => {
+        await uDoc('characters', charObj.id, { bankMoney: newBank });
+      }}
+    />
+    </AppErrorBoundary>;
+  }
+
+  const docId = `${selectedCampaignId}_${logicalUser.id}`;
+  const actChar = characters.find(c => c.id === docId) || null;
+
+  const handleRollDice = async (campaignId, playerName, skillName, result, dieType = 'D20', metadata = {}) => {
+    await cDoc('rolls', { campaignId, playerName, skillName, result, dieType, metadata, timestamp: Date.now() });
+    const existing = sessions.find(s => s.id === campaignId);
+    const lastRoll = { playerName, skillName, result, dieType, metadata, timestamp: Date.now() };
+    if (existing) {
+      await uDoc('sessions', campaignId, { lastRoll });
+    } else {
+      await cDoc('sessions', { id: campaignId, campaignId, active: false, npcIds: [], lastRoll });
+    }
+  };
+
+  return <PlayerSheet 
+    player={logicalUser} campaign={actCamp} characterData={actChar} stores={stores} categories={categories} items={items} npcs={npcs} characters={characters} negotiations={negotiations}
+    session={sessions.find(s => s.id === actCamp.id)}
+    currentUser={logicalUser}
+    onStartSession={() => {}}
+    onEndSession={() => {}}
+    onJoinSession={async () => { try { const liveSessions=await getCollection('sessions'); const sess=liveSessions.find(s=>s.id===actCamp.id || s.campaignId===actCamp.id); if(!sess?.active) return siteNotify('O Mestre ainda não iniciou a sessão.'); const sessionId=sess.id || actCamp.id; const ids=[...(sess.participantIds||[])]; if(!ids.includes(docId)) await uDoc('sessions',sessionId,{participantIds:[...ids,docId]}); } catch(err) { console.error(err); siteNotify('Não foi possível entrar na sessão. Verifica se o servidor está online.'); } }}
+    onLeaveSession={async () => { const sess=sessions.find(s=>s.id===actCamp.id); if(sess) await uDoc('sessions',actCamp.id,{participantIds:(sess.participantIds||[]).filter(id=>id!==docId)}); }}
+    onTransferMoney={async (recipientId, amount) => { const target=characters.find(c=>c.id===recipientId); if(target) await uDoc('characters',target.id,{money:(Number(target.money)||0)+amount}); }}
+    onTransferBankMoney={async (recipientId, amount) => { const target=characters.find(c=>c.id===recipientId); if(target) await uDoc('characters',target.id,{bankMoney:(Number(target.bankMoney)||0)+amount}); }}
+    onTransferItem={async (recipientId, item, quantity=1) => { const target=characters.find(c=>c.id===recipientId); if(target) { const inv=[...(target.inventory||[])]; const cap=10+inv.filter(i=>i.itemType==='backpack'&&i.backpackOpen).reduce((sum,i)=>sum+(Number(i.backpackSlots)||0),0); const stackable=item?.stackable !== false && item?.itemType !== 'weapon' && item?.itemType !== 'backpack'; const existing=stackable ? inv.findIndex(i=>i.name===item.name && i.itemType===item.itemType && i.stackable!==false) : -1; if(existing<0 && inv.filter(i=>i.itemType!=='backpack').length>=cap)return siteNotify(`O inventário de ${target.identity?.name||'jogador'} está cheio.`); const next=existing>=0 ? inv.map((x,i)=>i===existing?{...x,quantity:Number(x.quantity||1)+quantity}:x) : [...inv,{...item,quantity:stackable?quantity:1}]; await uDoc('characters',target.id,{inventory:next}); } }}
+    onUpdateCharacter={async (charId, action) => { const ch=characters.find(c=>c.id===charId); if(!ch) return; if(action.shootWeaponIndex!==undefined){
+        const activeSession=sessions.find(s=>s.id===actCamp.id);
+        const inv=[...(ch.inventory||[])]; const w=inv[action.shootWeaponIndex];
+        if(!w || Number(w.ammoLoaded||0)<=0) return siteNotify('A arma não tem munição carregada.');
+        inv[action.shootWeaponIndex]={...w,ammoLoaded:Number(w.ammoLoaded||0)-1};
+        await uDoc('characters',charId,{inventory:inv});
+        const damage=Math.max(0,Number(action.damageResult)||0);
+        if(action.targetType==='character' && action.targetId && action.targetId!==charId){
+          const target=characters.find(c=>c.id===action.targetId);
+          if(target && (activeSession?.participantIds||[]).includes(target.id)){
+            const vida=target.status?.vida||{};
+            await uDoc('characters',target.id,{status:{...(target.status||{}),vida:{...vida,current:Math.max(0,(Number(vida.current)||0)-damage)}}});
+          }
+        } else if(action.targetType==='npc' && action.targetId){
+          const target=npcs.find(n=>n.id===action.targetId);
+          if(target && (activeSession?.npcIds||[]).includes(target.id)) await uDoc('npcs',target.id,{vida:Math.max(0,(Number(target.vida)||0)-damage)});
+        }
+        return;
+      } if(action.reloadWeaponIndex!==undefined){ const inv=[...(ch.inventory||[])]; const w=inv[action.reloadWeaponIndex]; const needed=Math.max(0,Number(w.magazineSize||0)-Number(w.ammoLoaded||0)); if(needed<=0)return siteNotify('O carregador já está cheio.'); const ai=inv.findIndex(a=>a.itemType==='ammo'&&a.ammoType===w.ammoType&&Number(a.quantity||1)>0); if(ai<0)return siteNotify('Sem munição compatível.'); const use=Math.min(needed,Number(inv[ai].quantity||1)); inv[ai]={...inv[ai],quantity:Number(inv[ai].quantity||1)-use}; inv[action.reloadWeaponIndex]={...w,ammoLoaded:Number(w.ammoLoaded||0)+use}; await uDoc('characters',charId,{inventory:inv.filter(x=>Number(x.quantity??1)>0)}); } }}
+    onToggleSessionNPC={() => {}}
+    onSave={async (c, p, d) => { await uDoc('characters', `${c}_${p}`, d); }} 
